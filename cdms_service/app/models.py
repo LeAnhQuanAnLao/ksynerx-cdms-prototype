@@ -114,6 +114,7 @@ class InventoryItemPayload(BaseModel):
     freeze_qty: int = Field(0, ge=0, alias="freezeQty")
     in_transit_qty: int = Field(0, ge=0, alias="inTransitQty")
     is_active: bool = Field(True, alias="isActive")
+    action: Optional[str] = Field(None, max_length=16, alias="action", description="Action: INSERT, UPDATE, DELETE")
     last_updated_date: Optional[str] = Field(None, alias="lastUpdatedDate")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -122,7 +123,19 @@ class InventoryItemPayload(BaseModel):
     def populate_defaults(self) -> "InventoryItemPayload":
         if not self.sku:
             self.sku = self.partner_sku
+        if self.action and self.action.upper() == "DELETE":
+            self.is_active = False
         return self
+
+
+class ReconcileRequest(BaseModel):
+    """Payload to reconcile active inventory SKUs for a warehouse and detect deletions."""
+
+    warehouse_code: str = Field(..., min_length=1, max_length=64, alias="warehouseCode")
+    active_partner_skus: List[str] = Field(default_factory=list, alias="activePartnerSKUs")
+    source: str = Field("RECONCILIATION", max_length=32)
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class WebhookPayload(BaseModel):

@@ -10,6 +10,7 @@ from ..models import (
     CurrentInventoryState,
     InventoryChangeEvent,
     WebhookPayload,
+    ReconcileRequest,
     CDCProcessReport,
 )
 from ..security import check_rate_limit, verify_api_key, verify_webhook_hmac
@@ -45,6 +46,23 @@ async def receive_cdc_webhook(
         items=payload.items,
         source=payload.source or "WEBHOOK_CDC",
         client_event_id=payload.event_id,
+    )
+    return report
+
+
+@router.post("/reconcile", response_model=CDCProcessReport, status_code=status.HTTP_200_OK)
+def reconcile_inventory_catalog(
+    payload: ReconcileRequest,
+    db: Session = Depends(get_db),
+    authenticated: bool = Depends(verify_api_key),
+    _rate_limit: None = Depends(check_rate_limit),
+) -> CDCProcessReport:
+    """Reconcile active inventory catalog against current snapshots, recording DELETE for missing SKUs."""
+    engine = CDCEngine(db)
+    report = engine.reconcile_warehouse(
+        warehouse_code=payload.warehouse_code,
+        active_partner_skus=payload.active_partner_skus,
+        source=payload.source or "RECONCILIATION",
     )
     return report
 

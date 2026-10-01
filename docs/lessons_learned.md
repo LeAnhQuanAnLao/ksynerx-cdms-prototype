@@ -56,8 +56,10 @@
 | **Pessimistic Concurrency Lock**| COMPLETED | Row-level locking on `(warehouse_code, partner_sku)` + multi-attempt retry loop with `expunge_all` preventing race conditions under high concurrent spike load. |
 | **Defense-in-Depth Security** | COMPLETED | HMAC-SHA256 signature verification, API Key authentication, Sliding Window Rate Limiting, Excel magic bytes/size limits, and restricted CORS origins. |
 | **Fault Resilience** | COMPLETED | Circuit Breaker + exponential backoff for Vietful; SQLAlchemy connection retry & auto-rollback for DB; stateless reboot recovery. |
-| **Clients Emulator** | COMPLETED | `emulating_callback_client.py` and `rest_excel_client.py` generating realistic mock traffic, duplicates, HMAC signatures, and spike loads. |
-| **Automated Verification** | COMPLETED | Full automated test suite (38 test cases, 85% coverage) covering Unit, Integration, Security, and True Concurrency Spike Load. |
+| **Soft Delete & Reconciliation**| COMPLETED | Captures `DELETE` delta on inactive flags/action, plus warehouse catalog reconciliation endpoint `/api/v1/cdc/reconcile` detecting catalog drops. |
+| **Observability & Metrics** | COMPLETED | Prometheus format `/metrics` exposing uptime, circuit breaker state, active snapshot count, change event totals by type/source, and outcomes. |
+| **Clients Emulator** | COMPLETED | `emulating_callback_client.py`, `rest_excel_client.py`, and `run_demo.py` generating realistic mock traffic, duplicates, HMAC signatures, and spike loads. |
+| **Automated Verification** | COMPLETED | Full automated test suite (43 test cases, 87% coverage) covering Unit, Integration, Security, Metrics, and True Concurrency Spike Load. |
 | **Multi-Stage Containerization** | COMPLETED | Dockerfiles with multi-stage build, non-root user, tini PID 1, explicit healthchecks, hardened port binding (`127.0.0.1:5432`), and `docker-compose.yml`. |
 
 ### 2.2. Considered Future Extensions (Roadmap)

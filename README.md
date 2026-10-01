@@ -1,7 +1,7 @@
 # Change Data Management Service (CDMS) Prototype
 
-[![Tests](https://img.shields.io/badge/tests-38%20passed-brightgreen.svg)]()
-[![Coverage](https://img.shields.io/badge/coverage-86%25-green.svg)]()
+[![Tests](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-87%25-green.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11-blue.svg)]()
 [![Docker](https://img.shields.io/badge/docker-multi--stage-blue.svg)]()
 
@@ -172,6 +172,7 @@ Kiểm tra trạng thái các dịch vụ:
 - **CDMS API & Docs**: http://localhost:8000/docs
 - **Mock Vietful API**: http://localhost:8001/docs
 - **CDMS Healthcheck**: http://localhost:8000/health
+- **CDMS Prometheus Metrics**: http://localhost:8000/metrics
 
 ---
 
@@ -195,7 +196,15 @@ python -m uvicorn cdms_service.app.main:app --port 8000
 
 ## 7. Kịch bản kiểm thử & Demonstration
 
-Các kịch bản được viết sẵn trong thư mục `clients_emulator/`:
+### 🚀 Khởi chạy tự động toàn bộ kịch bản bằng 1 lệnh:
+```bash
+python run_demo.py
+```
+*(Script sẽ tự động chạy qua 7 bước: Healthcheck -> INSERT -> Exactly-Once Deduplication -> Stale Rejection -> Soft DELETE -> Catalog Reconciliation -> Prometheus Metrics).*
+
+---
+
+### Hoặc chạy từng kịch bản thủ công:
 
 ### Kịch bản 1: Gửi Webhook bình thường (Tạo mới sản phẩm)
 ```bash
@@ -241,8 +250,8 @@ curl -s http://localhost:8000/api/v1/cdc/states | python -m json.tool
 ---
 
 ## 8. Chạy Unit Test & Spike Load Test
-
-Hệ thống đi kèm bộ kiểm thử tự động toàn diện với **38 test cases** (bao gồm bảo mật HMAC có Anti-Replay Timestamp, Rate Limiting với cơ chế tự giải phóng bộ nhớ, Excel hardening với phòng chống Formula Injection, Intra-batch SKU Exactly-Once với session flush, và Concurrency Spike Load thật):
+ 
+Hệ thống đi kèm bộ kiểm thử tự động toàn diện với **43 test cases** (bao gồm bảo mật HMAC có Anti-Replay Timestamp, Rate Limiting với cơ chế tự giải phóng bộ nhớ, Excel hardening với phòng chống Formula Injection, Intra-batch SKU Exactly-Once với session flush, Soft Delete & Warehouse Reconciliation, Prometheus Metrics, và Concurrency Spike Load thật):
 
 ```bash
 # Chạy toàn bộ Unit Tests, Security Tests và Spike Load Tests
@@ -252,7 +261,7 @@ python -m pytest cdms_service/tests/ -v
 python -m pytest cdms_service/tests/ --cov=cdms_service/app --cov-report=term-missing
 ```
 
-Kết quả: **100% Test PASS (38/38)**, Coverage toàn hệ thống đạt **85% - 100%** trên các module lõi.
+Kết quả: **100% Test PASS (43/43)**, Coverage toàn hệ thống đạt **87% - 100%** trên các module lõi.
 
 ---
 

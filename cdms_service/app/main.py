@@ -7,6 +7,7 @@ from typing import AsyncGenerator, Dict
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.metrics import router as metrics_router
 from .api.upload_excel import router as upload_excel_router
 from .api.webhook import router as webhook_router
 from .config import settings
@@ -72,6 +73,7 @@ app.add_middleware(
 # Mount Routers
 app.include_router(webhook_router)
 app.include_router(upload_excel_router)
+app.include_router(metrics_router)
 
 
 @app.get("/health", tags=["System"])

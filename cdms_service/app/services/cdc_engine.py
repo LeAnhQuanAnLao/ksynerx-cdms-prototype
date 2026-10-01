@@ -1,11 +1,9 @@
 """Core Change Data Capture (CDC) and Exactly-Once deduplication engine."""
 
-import hashlib
-import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -18,6 +16,7 @@ from ..models import (
     ProcessedIdempotency,
 )
 from .hash_utils import TRACKED_FIELDS, compute_content_hash, parse_timestamp
+from .metrics import metrics_collector
 
 logger = logging.getLogger("cdms.cdc_engine")
 
@@ -41,19 +40,17 @@ class CDCEngine:
         incoming_hash = compute_content_hash(incoming_data)
         event_time = parse_timestamp(item.last_updated_date)
 
-        # 1. Acquire row-lock on current state
         query = self.db.query(CurrentInventoryState).filter(
             CurrentInventoryState.warehouse_code == wh,
             CurrentInventoryState.partner_sku == sku_key,
         )
-        # Apply pessimistic row lock if supported (e.g. Postgres)
         bind = self.db.get_bind()
         if bind and bind.dialect.name != "sqlite":
             query = query.with_for_update()
 
         current_record = query.first()
 
-        # CASE 1: Brand new product / inventory record
+        # CASE 1: Brand new product record
         if not current_record:
             return self._handle_insert(wh, sku_key, item, incoming_hash, event_time, source, client_event_id)
 
@@ -63,7 +60,6 @@ class CDCEngine:
             curr_time = curr_time.replace(tzinfo=timezone.utc)
 
         if event_time < curr_time:
-            logger.info("Discarded outdated event for %s#%s (incoming: %s < current: %s)", wh, sku_key, event_time, curr_time)
             return ProcessItemResult(
                 warehouse_code=wh,
                 partner_sku=sku_key,
@@ -82,7 +78,7 @@ class CDCEngine:
                 message="Payload is identical to current state (no delta)",
             )
 
-        # CASE 4: Valid modification (delta detected)
+        # CASE 4: Valid modification (UPDATE or DELETE delta detected)
         return self._handle_update(current_record, wh, sku_key, item, incoming_hash, event_time, source, client_event_id)
 
     def _handle_insert(
@@ -104,28 +100,15 @@ class CDCEngine:
             partner_sku=sku_key,
             sku=item.sku or sku_key,
             product_name=item.product_name,
-            unit_code=item.unit_code,
-            condition_type_code=item.condition_type_code,
-            physical_qty=item.physical_qty,
-            available_qty=item.available_qty,
-            pending_in_qty=item.pending_in_qty,
-            pending_out_qty=item.pending_out_qty,
-            freeze_qty=item.freeze_qty,
-            in_transit_qty=item.in_transit_qty,
-            is_active=item.is_active,
             content_hash=content_hash,
             version=1,
             last_event_timestamp=event_time,
             updated_at=datetime.now(timezone.utc),
+            **{f: getattr(item, f) for f in TRACKED_FIELDS if f != "sku"},
         )
         self.db.add(new_record)
 
-        # Unique event_id per change event even in batch payloads
-        if client_event_id:
-            eid = f"{client_event_id}#{wh}#{sku_key}#v1"
-        else:
-            eid = f"{source}#{wh}#{sku_key}#v1#{content_hash[:8]}"
-
+        eid = f"{client_event_id}#{wh}#{sku_key}#v1" if client_event_id else f"{source}#{wh}#{sku_key}#v1#{content_hash[:8]}"
         change_event = InventoryChangeEvent(
             event_id=eid,
             warehouse_code=wh,
@@ -164,7 +147,7 @@ class CDCEngine:
         source: str,
         client_event_id: Optional[str],
     ) -> ProcessItemResult:
-        """Handle genuine delta update and store granular field difference."""
+        """Handle delta update or soft deletion."""
         old_snapshot = {field: getattr(current, field) for field in TRACKED_FIELDS}
         new_snapshot = {field: getattr(item, field) for field in TRACKED_FIELDS}
 
@@ -175,38 +158,27 @@ class CDCEngine:
             if old_val != new_val:
                 field_diff[field] = {"old": old_val, "new": new_val}
 
+        # Check if deletion/inactive action
+        is_delete = (item.action and item.action.upper() == "DELETE") or (current.is_active and not item.is_active)
+        change_type = "DELETE" if is_delete else "UPDATE"
         new_version = current.version + 1
 
-        # Update current state
-        current.sku = item.sku or current.sku
+        for field in TRACKED_FIELDS:
+            setattr(current, field, getattr(item, field))
         if item.product_name:
             current.product_name = item.product_name
-        current.unit_code = item.unit_code
-        current.condition_type_code = item.condition_type_code
-        current.physical_qty = item.physical_qty
-        current.available_qty = item.available_qty
-        current.pending_in_qty = item.pending_in_qty
-        current.pending_out_qty = item.pending_out_qty
-        current.freeze_qty = item.freeze_qty
-        current.in_transit_qty = item.in_transit_qty
-        current.is_active = item.is_active
         current.content_hash = content_hash
         current.version = new_version
         current.last_event_timestamp = event_time
         current.updated_at = datetime.now(timezone.utc)
 
-        # Unique event_id per change event even in batch payloads
-        if client_event_id:
-            eid = f"{client_event_id}#{wh}#{sku_key}#v{new_version}"
-        else:
-            eid = f"{source}#{wh}#{sku_key}#v{new_version}#{content_hash[:8]}"
-
+        eid = f"{client_event_id}#{wh}#{sku_key}#v{new_version}" if client_event_id else f"{source}#{wh}#{sku_key}#v{new_version}#{content_hash[:8]}"
         change_event = InventoryChangeEvent(
             event_id=eid,
             warehouse_code=wh,
             partner_sku=sku_key,
             sku=item.sku or sku_key,
-            change_type="UPDATE",
+            change_type=change_type,
             source=source,
             source_timestamp=event_time,
             detected_at=datetime.now(timezone.utc),
@@ -222,10 +194,10 @@ class CDCEngine:
             warehouse_code=wh,
             partner_sku=sku_key,
             status="RECORDED_CHANGE",
-            change_type="UPDATE",
+            change_type=change_type,
             version=new_version,
             diff=field_diff,
-            message="Recorded delta change (UPDATE)",
+            message=f"Recorded delta change ({change_type})",
         )
 
     def process_batch(
@@ -237,7 +209,6 @@ class CDCEngine:
         """Process a list of inventory items transactionally with batch idempotency."""
         max_attempts = 4
         for attempt in range(max_attempts):
-            # 1. Fast-path Batch Idempotency Check (evaluated on each retry attempt)
             if client_event_id:
                 existing_idem = (
                     self.db.query(ProcessedIdempotency)
@@ -245,38 +216,40 @@ class CDCEngine:
                     .first()
                 )
                 if existing_idem:
-                    results = [
-                        ProcessItemResult(
-                            warehouse_code=item.warehouse_code,
-                            partner_sku=item.partner_sku,
-                            status="IGNORED_DUPLICATE",
-                            message=f"Event ID '{client_event_id}' was already processed",
-                        )
-                        for item in items
-                    ]
+                    metrics_collector.record_outcome("IGNORED_DUPLICATE")
                     return CDCProcessReport(
                         total_received=len(items),
                         recorded_changes=0,
                         ignored_duplicates=len(items),
                         ignored_outdated=0,
-                        results=results,
+                        results=[
+                            ProcessItemResult(
+                                warehouse_code=it.warehouse_code,
+                                partner_sku=it.partner_sku,
+                                status="IGNORED_DUPLICATE",
+                                message=f"Event ID '{client_event_id}' was already processed",
+                            )
+                            for it in items
+                        ],
                     )
 
             results: List[ProcessItemResult] = []
-            recorded = 0
-            duplicates = 0
-            outdated = 0
+            recorded = duplicates = outdated = 0
             try:
                 for item in items:
                     res = self.process_item(item, source=source, client_event_id=client_event_id)
                     results.append(res)
                     if res.status == "RECORDED_CHANGE":
                         recorded += 1
+                        metrics_collector.record_change(res.change_type or "UPDATE", source)
+                        metrics_collector.record_outcome("RECORDED_CHANGE")
                         self.db.flush()
                     elif res.status == "IGNORED_DUPLICATE":
                         duplicates += 1
+                        metrics_collector.record_outcome("IGNORED_DUPLICATE")
                     elif res.status == "IGNORED_OUTDATED":
                         outdated += 1
+                        metrics_collector.record_outcome("IGNORED_OUTDATED")
 
                 if client_event_id:
                     self.db.merge(ProcessedIdempotency(
@@ -294,7 +267,6 @@ class CDCEngine:
                     logger.error("Failed to commit batch after %d attempts: %s", max_attempts, exc)
                     raise
                 time.sleep(0.03 * (attempt + 1))
-                logger.info("Concurrency conflict (attempt %d/%d), retrying...", attempt + 1, max_attempts)
             except Exception as exc:
                 self.db.rollback()
                 self.db.expunge_all()
@@ -306,5 +278,79 @@ class CDCEngine:
             recorded_changes=recorded,
             ignored_duplicates=duplicates,
             ignored_outdated=outdated,
+            results=results,
+        )
+
+    def reconcile_warehouse(
+        self,
+        warehouse_code: str,
+        active_partner_skus: List[str],
+        source: str = "RECONCILIATION",
+    ) -> CDCProcessReport:
+        """Detect missing items from active catalog list and mark them as DELETE."""
+        wh = warehouse_code.strip()
+        active_set = {s.strip() for s in active_partner_skus if s.strip()}
+        now = datetime.now(timezone.utc)
+
+        query = self.db.query(CurrentInventoryState).filter(
+            CurrentInventoryState.warehouse_code == wh,
+            CurrentInventoryState.is_active == True,
+        )
+        bind = self.db.get_bind()
+        if bind and bind.dialect.name != "sqlite":
+            query = query.with_for_update()
+
+        active_records = query.all()
+        results: List[ProcessItemResult] = []
+        recorded = 0
+
+        for record in active_records:
+            if record.partner_sku not in active_set:
+                old_snap = {f: getattr(record, f) for f in TRACKED_FIELDS}
+                record.is_active = False
+                record.version += 1
+                record.updated_at = now
+                record.last_event_timestamp = now
+                new_snap = {f: getattr(record, f) for f in TRACKED_FIELDS}
+                record.content_hash = compute_content_hash(new_snap)
+
+                diff = {"is_active": {"old": True, "new": False}}
+                eid = f"{source}#{wh}#{record.partner_sku}#v{record.version}"
+                ev = InventoryChangeEvent(
+                    event_id=eid,
+                    warehouse_code=wh,
+                    partner_sku=record.partner_sku,
+                    sku=record.sku,
+                    change_type="DELETE",
+                    source=source,
+                    source_timestamp=now,
+                    detected_at=now,
+                    old_state=old_snap,
+                    new_state=new_snap,
+                    diff=diff,
+                    content_hash=record.content_hash,
+                    version=record.version,
+                )
+                self.db.add(ev)
+                self.db.flush()
+                recorded += 1
+                metrics_collector.record_change("DELETE", source)
+                metrics_collector.record_outcome("RECORDED_CHANGE")
+                results.append(ProcessItemResult(
+                    warehouse_code=wh,
+                    partner_sku=record.partner_sku,
+                    status="RECORDED_CHANGE",
+                    change_type="DELETE",
+                    version=record.version,
+                    diff=diff,
+                    message="Reconciled: Item missing from active catalog, marked as DELETE",
+                ))
+
+        self.db.commit()
+        return CDCProcessReport(
+            total_received=len(active_records),
+            recorded_changes=recorded,
+            ignored_duplicates=len(active_records) - recorded,
+            ignored_outdated=0,
             results=results,
         )
