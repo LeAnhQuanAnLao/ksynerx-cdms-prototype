@@ -1,0 +1,111 @@
+version: "3.8"
+
+services:
+  # ============================================================================
+  # 1. PostgreSQL - Change Database (ACID & Row Locks for Exactly-Once)
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: cdms_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cdms_user
+      POSTGRES_PASSWORD: cdms_password
+      POSTGRES_DB: cdms_db
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdms_user -d cdms_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - cdms_network
+
+  # ============================================================================
+  # 2. Mock Vietful Inventory Service (External API emulation)
+  # ============================================================================
+  mock_vietful:
+    build:
+      context: ./mock_vietful
+      dockerfile: Dockerfile
+    container_name: cdms_mock_vietful
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - cdms_network
+
+  # ============================================================================
+  # 3. CDMS Service (Change Data Management Service)
+  # ============================================================================
+  cdms_service:
+    build:
+      context: ./cdms_service
+      dockerfile: Dockerfile
+    container_name: cdms_service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock_vietful:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://cdms_user:cdms_password@postgres:5432/cdms_db
+      - VIETFUL_API_BASE_URL=http://mock_vietful:8001
+      - SCHEDULER_INTERVAL_SECONDS=15
+      - SCHEDULER_ENABLED=true
+      - CIRCUIT_BREAKER_MAX_FAILURES=3
+      - CIRCUIT_BREAKER_RESET_TIMEOUT=20
+      - API_KEY=cdms-secret-api-key-2026
+      - WEBHOOK_SECRET=cdms-webhook-secret-2026
+      - REQUIRE_AUTH=false
+      - MAX_UPLOAD_SIZE_MB=10
+      - MAX_EXCEL_ROWS=10000
+      - RATE_LIMIT_PER_MINUTE=120
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:8000,http://127.0.0.1:8000
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
+    networks:
+      - cdms_network
+
+networks:
+  cdms_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
