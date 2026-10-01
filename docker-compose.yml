@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ============================================================================
   # 1. PostgreSQL - Change Database (ACID & Row Locks for Exactly-Once)
@@ -13,7 +11,7 @@ services:
       POSTGRES_PASSWORD: cdms_password
       POSTGRES_DB: cdms_db
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
